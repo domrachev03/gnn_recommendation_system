@@ -1,84 +1,89 @@
 from time import time
-from scipy.sparse import csc_matrix
 import numpy as np
-import h5py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-from torch.autograd import Variable
-from torch.utils.data import Dataset, DataLoader
-from torch.nn.parameter import Parameter
+import sys
+
+sys.path.append('benchmark')
+from metrics import get_metrics, get_metrics_names
 
 torch.manual_seed(1284)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 def load_data_100k(path='./', delimiter='\t'):
+    ''' Loading the dataset MovieLens into the predictor'''
 
+    # Load raw data
     train = np.loadtxt(path+'u1.base', skiprows=0, delimiter=delimiter).astype('int32')
     test = np.loadtxt(path+'u1.test', skiprows=0, delimiter=delimiter).astype('int32')
     total = np.concatenate((train, test), axis=0)
 
-    n_u = np.unique(total[:,0]).size  # num of users
-    n_m = np.unique(total[:,1]).size  # num of movies
+    n_u = np.unique(total[:, 0]).size  # num of users
+    n_m = np.unique(total[:, 1]).size  # num of movies
     n_train = train.shape[0]  # num of training ratings
     n_test = test.shape[0]  # num of test ratings
 
-    train_r = np.zeros((n_m, n_u), dtype='float32')
-    test_r = np.zeros((n_m, n_u), dtype='float32')
+    # Rating matrix
+    train_rating = np.zeros((n_m, n_u), dtype='float32')
+    test_rating = np.zeros((n_m, n_u), dtype='float32')
 
     for i in range(n_train):
-        train_r[train[i,1]-1, train[i,0]-1] = train[i,2]
+        #            item_id         usr_id          rating
+        train_rating[train[i, 1]-1, train[i, 0]-1] = train[i, 2]
 
     for i in range(n_test):
-        test_r[test[i,1]-1, test[i,0]-1] = test[i,2]
+        #            item_id         usr_id          rating
+        test_rating[test[i, 1]-1, test[i, 0]-1] = test[i, 2]
 
-    train_m = np.greater(train_r, 1e-12).astype('float32')  # masks indicating non-zero entries
-    test_m = np.greater(test_r, 1e-12).astype('float32')
+    # Masks, indicating non-zero entries
+    train_mask = np.greater(train_rating, 1e-12).astype('float32')
+    test_mask = np.greater(test_rating, 1e-12).astype('float32')
 
-    print('data matrix loaded')
-    print('num of users: {}'.format(n_u))
-    print('num of movies: {}'.format(n_m))
-    print('num of training ratings: {}'.format(n_train))
-    print('num of test ratings: {}'.format(n_test))
-
-    return n_m, n_u, train_r, train_m, test_r, test_m
-
-
-def local_kernel(u, v):
-    dist = torch.norm(u - v, p=2, dim=2)
-    hat = torch.clamp(1. - dist**2, min=0.)
-    return hat
+    return n_m, n_u, train_rating, train_mask, test_rating, test_mask
 
 
 class KernelLayer(nn.Module):
+    ''' Kernel layer of the model'''
     def __init__(self, n_in, n_hid, n_dim, lambda_s, lambda_2, activation=nn.Sigmoid()):
         super().__init__()
+        # Initializing the parameters of the kernel
         self.W = nn.Parameter(torch.randn(n_in, n_hid))
         self.u = nn.Parameter(torch.randn(n_in, 1, n_dim))
         self.v = nn.Parameter(torch.randn(1, n_hid, n_dim))
         self.b = nn.Parameter(torch.randn(n_hid))
 
+        # Regularization terms
         self.lambda_s = lambda_s
         self.lambda_2 = lambda_2
 
+        # Weights initialization
         nn.init.xavier_uniform_(self.W, gain=torch.nn.init.calculate_gain("relu"))
         nn.init.xavier_uniform_(self.u, gain=torch.nn.init.calculate_gain("relu"))
         nn.init.xavier_uniform_(self.v, gain=torch.nn.init.calculate_gain("relu"))
         nn.init.zeros_(self.b)
         self.activation = activation
 
+    def local_kernel(self, u, v):
+        ''' Local kernel, which is radial basis function'''
+        dist = torch.norm(u - v, p=2, dim=2)
+        hat = torch.clamp(1. - dist**2, min=0.)
+        return hat
+
     def forward(self, x):
-        w_hat = local_kernel(self.u, self.v)
-        
+        w_hat = self.local_kernel(self.u, self.v)
+
+        # Mean Squared w_hat
         sparse_reg = torch.nn.functional.mse_loss(w_hat, torch.zeros_like(w_hat))
         sparse_reg_term = self.lambda_s * sparse_reg
-        
+
+        # Mean Squared W
         l2_reg = torch.nn.functional.mse_loss(self.W, torch.zeros_like(self.W))
         l2_reg_term = self.lambda_2 * l2_reg
 
-        W_eff = self.W * w_hat  # Local kernelised weight matrix
+        # Local reparametrized weight matrix
+        W_eff = self.W * w_hat  
         y = torch.matmul(x, W_eff) + self.b
         y = self.activation(y)
 
@@ -86,14 +91,19 @@ class KernelLayer(nn.Module):
 
 
 class KernelNet(nn.Module):
+    ''' Autoencoder networkm '''
     def __init__(self, n_u, n_hid, n_dim, n_layers, lambda_s, lambda_2):
         super().__init__()
+
         layers = []
         for i in range(n_layers):
             if i == 0:
                 layers.append(KernelLayer(n_u, n_hid, n_dim, lambda_s, lambda_2))
             else:
+                # Kernels of the same size
                 layers.append(KernelLayer(n_hid, n_hid, n_dim, lambda_s, lambda_2))
+
+        # Last layer -- kernel without activation and with specified output dimension
         layers.append(KernelLayer(n_hid, n_u, n_dim, lambda_s, lambda_2, activation=nn.Identity()))
         self.layers = nn.ModuleList(layers)
         self.dropout = nn.Dropout(0.33)
@@ -102,269 +112,230 @@ class KernelNet(nn.Module):
         total_reg = None
         for i, layer in enumerate(self.layers):
             x, reg = layer(x)
+
+            # Apply dropout on the last layer
             if i < len(self.layers)-1:
                 x = self.dropout(x)
+
+            # Regularization terms summation
             if total_reg is None:
                 total_reg = reg
             else:
                 total_reg += reg
+
         return x, total_reg
 
 
-class CompleteNet(nn.Module):
-    def __init__(self, kernel_net, n_u, n_m, n_hid, n_dim, n_layers, lambda_s, lambda_2, gk_size, dot_scale):
+class GLocal_K(nn.Module):
+    '''The GLocal-K network, finetuning on the global kernel '''
+    def __init__(self, kernel_net, n_m, gk_size, dot_scale):
         super().__init__()
+
+        # Size of the global kernel
         self.gk_size = gk_size
-        self.dot_scale = dot_scale
+        # Pretrained KernelNet
         self.local_kernel_net = kernel_net
+        self.dot_scale = dot_scale
+
+        # Convolution layer init
         self.conv_kernel = torch.nn.Parameter(torch.randn(n_m, gk_size**2) * 0.1)
         nn.init.xavier_uniform_(self.conv_kernel, gain=torch.nn.init.calculate_gain("relu"))
-      
-
-    def forward(self, x, x_local):
-        gk = self.global_kernel(x_local, self.gk_size, self.dot_scale)
-        x = self.global_conv(x, gk)
-        x, global_reg_loss = self.local_kernel_net(x)
-        return x, global_reg_loss
 
     def global_kernel(self, input, gk_size, dot_scale):
         avg_pooling = torch.mean(input, dim=1)  # Item (axis=1) based average pooling
         avg_pooling = avg_pooling.view(1, -1)
 
-        gk = torch.matmul(avg_pooling, self.conv_kernel) * dot_scale  # Scaled dot product
-        gk = gk.view(1, 1, gk_size, gk_size)
+        global_kernel = torch.matmul(avg_pooling, self.conv_kernel) * dot_scale  # Scaled dot product
+        global_kernel = global_kernel.view(1, 1, gk_size, gk_size)
 
-        return gk
+        return global_kernel
 
     def global_conv(self, input, W):
         input = input.unsqueeze(0).unsqueeze(0)
         conv2d = nn.LeakyReLU()(F.conv2d(input, W, stride=1, padding=1))
         return conv2d.squeeze(0).squeeze(0)
 
+    def forward(self, x, x_local):
+        # First, apply global kernel
+        gk = self.global_kernel(x_local, self.gk_size, self.dot_scale)
+        x = self.global_conv(x, gk)
+        # Then run the Kenel Network
+        x, global_reg_loss = self.local_kernel_net(x)
+        return x, global_reg_loss
+
 
 class Loss(nn.Module):
-    def forward(self, pred_p, reg_loss, train_m, train_r):
-        # L2 loss
-        diff = train_m * (train_r - pred_p)
-        sqE = torch.nn.functional.mse_loss(diff, torch.zeros_like(diff))
-        loss_p = sqE + reg_loss
-        return loss_p
+    '''L2 loss class'''
+    def forward(self, pred_p, reg_loss, train_mask, train_rating):
+        # Calculating Mean Square Error
+        # Considers only initially non-empty elements
+        diff = train_mask * (train_rating - pred_p)
+        mse = torch.nn.functional.mse_loss(diff, torch.zeros_like(diff))
+
+        # Applying loss regularization
+        loss_value = mse + reg_loss
+        return loss_value
 
 
-# Metrics
-def dcg_k(score_label, k):
-    dcg, i = 0., 0
-    for s in score_label:
-        if i < k:
-            dcg += (2**s[1]-1) / np.log2(2+i)
-            i += 1
-    return dcg
+def print_info(i: int, train_metrics: dict, test_metrics: dict, t, time_cumulative: float, is_pretraining=True):
+    print('-' * 60)
+    if is_pretraining:
+        print('PRE-TRAINING')
+    else:
+        print('FINETUNING')
 
-
-def ndcg_k(y_hat, y, k):
-    score_label = np.stack([y_hat, y], axis=1).tolist()
-    score_label = sorted(score_label, key=lambda d:d[0], reverse=True)
-    score_label_ = sorted(score_label, key=lambda d:d[1], reverse=True)
-    norm, i = 0., 0
-    for s in score_label_:
-        if i < k:
-            norm += (2**s[1]-1) / np.log2(2+i)
-            i += 1
-    dcg = dcg_k(score_label, k)
-    return dcg / norm
-
-
-def call_ndcg(y_hat, y):
-    ndcg_sum, num = 0, 0
-    y_hat, y = y_hat.T, y.T
-    n_users = y.shape[0]
-
-    for i in range(n_users):
-        y_hat_i = y_hat[i][np.where(y[i])]
-        y_i = y[i][np.where(y[i])]
-
-        if y_i.shape[0] < 2:
-            continue
-
-        ndcg_sum += ndcg_k(y_hat_i, y_i, y_i.shape[0])  # user-wise calculation
-        num += 1
-
-    return ndcg_sum / num
+    print('Epoch:', i+1)
+    for metric_name in train_metrics.keys():
+        print(f'    Metric {metric_name}: train -- {train_metrics[metric_name]}, test -- {test_metrics[metric_name]}')
+    print('Time per epoch:', t, 'seconds')
+    print('Total time:', time_cumulative, 'seconds')
+    print('-' * 60)
 
 
 # Train & Val
-def train(data_path='data/raw/ml-100k/'):
-    n_m, n_u, train_r, train_m, test_r, test_m = load_data_100k(path=data_path, delimiter='\t')
+def train(data_path='/kaggle/input/u111111/', weights_output_dir='.', verbose=False):
+    n_m, n_u, train_rating, train_mask, test_rating, test_mask = load_data_100k(path=data_path, delimiter='\t')
+
     # Common hyperparameter settings
-    n_hid = 500         # size of hidden layers
-    n_dim = 5           # inner AE embedding size
-    n_layers = 2        # number of hidden layers
-    gk_size = 3         # width=height of kernel for convolution
+    n_hid = 500         # Size of hidden layers
+    n_dim = 5           # Inner AE embedding size
+    n_layers = 2        # Number of hidden layers
+    gk_size = 3         # Width=height of kernel for convolution
 
     # Hyperparameters to tune for specific case
-    max_epoch_p = 500   # max number of epochs for pretraining
-    max_epoch_f = 1000  # max number of epochs for finetuning
-    patience_p = 5      # number of consecutive rounds of early stopping condition before actual stop for pretraining
-    patience_f = 10     # and finetuning
-    tol_p = 1e-4        # minimum threshold for the difference between consecutive values of train rmse, used for early stopping, for pretraining
-    tol_f = 1e-5        # and finetuning
-    lambda_2 = 20.      # regularisation of number or parameters
-    lambda_s = 0.006    # regularisation of sparsity of the final matrix
-    dot_scale = 1       # dot product weight for global kernel
-    
-    model = KernelNet(n_u, n_hid, n_dim, n_layers, lambda_s, lambda_2).double().to(device)
-    complete_model = CompleteNet(
-        model, n_u, n_m, n_hid, n_dim, n_layers, lambda_s, lambda_2, gk_size, dot_scale
+    max_epoch_p = 500   # Max number of epochs for pretraining
+    max_epoch_f = 1000  # Max number of epochs for finetuning
+    patience_p = 5      # No of rounds for early stopping during pretraining
+    patience_f = 5     # No of rounds for early stopping during finetuning
+    tol_p = 1e-4        # RMSE diff threshold for early stopping during pretraining
+    tol_f = 1e-5        # RMSE diff threshold for early stopping during finetuning
+    lambda_2 = 20.      # L2 regularization
+    lambda_s = 0.006    # L1 regularization
+    dot_scale = 1       # Dot product weight for global kernel
+
+    autoencoder_net = KernelNet(n_u, n_hid, n_dim, n_layers, lambda_s, lambda_2).double().to(device)
+
+    glocal_k = GLocal_K(
+        autoencoder_net, n_m, gk_size, dot_scale
     ).double().to(device)
 
-    best_rmse_ep, best_mae_ep, best_ndcg_ep = 0, 0, 0
-    best_rmse, best_mae, best_ndcg = float("inf"), float("inf"), 0
-
+    # Compute execution time
     time_cumulative = 0
     tic = time()
 
     # Pre-Training
-    optimizer = torch.optim.AdamW(complete_model.local_kernel_net.parameters(), lr=0.001)
-
-    def closure():
-        optimizer.zero_grad()
-        x = torch.Tensor(train_r).double().to(device)
-        m = torch.Tensor(train_m).double().to(device)
-        complete_model.local_kernel_net.train()
-        pred, reg = complete_model.local_kernel_net(x)
-        loss = Loss().to(device)(pred, reg, m, x)
-        loss.backward()
-        return loss
+    optimizer = torch.optim.AdamW(glocal_k.local_kernel_net.parameters(), lr=1e-3)
 
     last_rmse = np.inf
     counter = 0
 
+    loss_fn = Loss().to(device)
+
     for i in range(max_epoch_p):
-        optimizer.step(closure)
-        complete_model.local_kernel_net.eval()
+        # Training step
+        optimizer.zero_grad()
+
+        x = torch.Tensor(train_rating).double().to(device)
+        masks = torch.Tensor(train_mask).double().to(device)
+
+        # Forward pass for local network
+        glocal_k.local_kernel_net.train()
+        preds, regularization_value = glocal_k.local_kernel_net(x)
+
+        loss = loss_fn(preds, regularization_value, masks, x)
+
+        loss.backward()
+        optimizer.step()
+
+        # Metrics computation
+        glocal_k.local_kernel_net.eval()
         t = time() - tic
         time_cumulative += t
 
-        pre, _ = model(torch.Tensor(train_r).double().to(device))
+        preds = preds.float().cpu().detach().numpy()
 
-        pre = pre.float().cpu().detach().numpy()
+        train_metrics = get_metrics(preds, test_rating, test_mask)
+        test_metrics = get_metrics(preds, train_rating, train_mask)
 
-        error = (test_m * (np.clip(pre, 1., 5.) - test_r) ** 2).sum() / test_m.sum()  # test error
-        test_rmse = np.sqrt(error)
-
-        error_train = (train_m * (np.clip(pre, 1., 5.) - train_r) ** 2).sum() / train_m.sum()  # train error
-        train_rmse = np.sqrt(error_train)
-
-        if last_rmse-train_rmse < tol_p:
+        # Early Stopping Criterion update
+        if last_rmse - train_metrics['rmse'] < tol_p:
             counter += 1
         else:
             counter = 0
 
-        last_rmse = train_rmse
+        last_rmse = train_metrics['rmse']
 
+        # Trigerring Early Stopping
         if patience_p == counter:
-            print('.-^-._' * 12)
-            print('PRE-TRAINING')
-            print('Epoch:', i+1, 'test rmse:', test_rmse, 'train rmse:', train_rmse)
-            print('Time:', t, 'seconds')
-            print('Time cumulative:', time_cumulative, 'seconds')
-            print('.-^-._' * 12)
+            print_info(i, train_metrics, test_metrics, t, time_cumulative)
             break
 
-        if i % 50 != 0:
-            continue
-        print('.-^-._' * 12)
-        print('PRE-TRAINING')
-        print('Epoch:', i, 'test rmse:', test_rmse, 'train rmse:', train_rmse)
-        print('Time:', t, 'seconds')
-        print('Time cumulative:', time_cumulative, 'seconds')
-        print('.-^-._' * 12)
-        train_r_local = np.clip(pre, 1., 5.)
+        if i % 50 == 0:
+            print_info(i, train_metrics, test_metrics, t, time_cumulative)
 
-    train_r_local = np.clip(pre, 1., 5.)
+    # Predictions after pretraining from autoencoder
+    train_rating_local = np.clip(preds, 1., 5.)
 
-    optimizer = torch.optim.AdamW(complete_model.parameters(), lr=0.001)
+    optimizer = torch.optim.AdamW(glocal_k.parameters(), lr=0.001)
 
-    def closure():
-        optimizer.zero_grad()
-        x = torch.Tensor(train_r).double().to(device)
-        x_local = torch.Tensor(train_r_local).double().to(device)
-        m = torch.Tensor(train_m).double().to(device)
-        complete_model.train()
-        pred, reg = complete_model(x, x_local)
-        loss = Loss().to(device)(pred, reg, m, x)
-        loss.backward()
-        return loss
+    metrics_info = get_metrics_names()
+
+    best_metric_epoch = {metric[0]: 0 for metric in metrics_info}
+    best_metric_value = {metric[0]: 0 if metric[1] else float("inf") for metric in metrics_info}
 
     last_rmse = np.inf
     counter = 0
 
     for i in range(max_epoch_f):
-        optimizer.step(closure)
-        complete_model.eval()
+        # Training step
+        optimizer.zero_grad()
+
+        x = torch.Tensor(train_rating).double().to(device)
+        x_local = torch.Tensor(train_rating_local).double().to(device)
+        mask = torch.Tensor(train_mask).double().to(device)
+        # Global finetuning
+        glocal_k.train()
+        preds, reg = glocal_k(x, x_local)
+
+        loss = loss_fn(preds, reg, mask, x)
+        loss.backward()
+
+        glocal_k.eval()
         t = time() - tic
         time_cumulative += t
 
-        pre, _ = complete_model(torch.Tensor(train_r).double().to(device), torch.Tensor(train_r_local).double().to(device))
+        preds = preds.float().cpu().detach().numpy()
 
-        pre = pre.float().cpu().detach().numpy()
+        train_metrics = get_metrics(preds, test_rating, test_mask)
+        test_metrics = get_metrics(preds, train_rating, train_mask)
 
-        error = (test_m * (np.clip(pre, 1., 5.) - test_r) ** 2).sum() / test_m.sum()  # test error
-        test_rmse = np.sqrt(error)
+        for metric_name, is_bigger_better in metrics_info:
+            # Updates both maximum and minimum, based on metrics information
+            if (is_bigger_better and test_metrics[metric_name] > best_metric_value[metric_name]) or \
+               (not is_bigger_better and test_metrics[metric_name] < best_metric_value[metric_name]):
+                torch.save(glocal_k.state_dict, f"{weights_output_dir}/best_model_{metric_name}.pt")
+                best_metric_value[metric_name] = test_metrics[metric_name]
+                best_metric_epoch[metric_name] = i+1
 
-        error_train = (train_m * (np.clip(pre, 1., 5.) - train_r) ** 2).sum() / train_m.sum()  # train error
-        train_rmse = np.sqrt(error_train)
-
-        test_mae = (test_m * np.abs(np.clip(pre, 1., 5.) - test_r)).sum() / test_m.sum()
-        train_mae = (train_m * np.abs(np.clip(pre, 1., 5.) - train_r)).sum() / train_m.sum()
-
-        test_ndcg = call_ndcg(np.clip(pre, 1., 5.), test_r)
-        train_ndcg = call_ndcg(np.clip(pre, 1., 5.), train_r)
-
-        if test_rmse < best_rmse:
-            best_rmse = test_rmse
-            best_rmse_ep = i+1
-
-        if test_mae < best_mae:
-            best_mae = test_mae
-            best_mae_ep = i+1
-
-        if best_ndcg < test_ndcg:
-            best_ndcg = test_ndcg
-            best_ndcg_ep = i+1
-
-        if last_rmse-train_rmse < tol_f:
+        if last_rmse-train_metrics['rmse'] < tol_f:
+            print(counter)
             counter += 1
         else:
             counter = 0
+        last_rmse = train_metrics['rmse']
 
-        last_rmse = train_rmse
-
+        # Trigerring Early Stopping
         if patience_f == counter:
-            print('.-^-._' * 12)
-            print('FINE-TUNING')
-            print('Epoch:', i+1, 'test rmse:', test_rmse, 'test mae:', test_mae, 'test ndcg:', test_ndcg)
-            print('Epoch:', i+1, 'train rmse:', train_rmse, 'train mae:', train_mae, 'train ndcg:', train_ndcg)
-            print('Time:', t, 'seconds')
-            print('Time cumulative:', time_cumulative, 'seconds')
-            print('.-^-._' * 12)
+            print_info(i, train_metrics, test_metrics, t, time_cumulative, is_pretraining=False)
             break
 
-        if i % 50 != 0:
-            continue
+        if i % 50 == 0:
+            print_info(i, train_metrics, test_metrics, t, time_cumulative, is_pretraining=False)
 
-        print('.-^-._' * 12)
-        print('FINE-TUNING')
-        print('Epoch:', i, 'test rmse:', test_rmse, 'test mae:', test_mae, 'test ndcg:', test_ndcg)
-        print('Epoch:', i, 'train rmse:', train_rmse, 'train mae:', train_mae, 'train ndcg:', train_ndcg)
-        print('Time:', t, 'seconds')
-        print('Time cumulative:', time_cumulative, 'seconds')
-        print('.-^-._' * 12)
-
-        # Final result
-        print('Epoch:', best_rmse_ep, ' best rmse:', best_rmse)
-        print('Epoch:', best_mae_ep, ' best mae:', best_mae)
-        print('Epoch:', best_ndcg_ep, ' best ndcg:', best_ndcg)
+    print('='*80)
+    # Final result
+    for metric_name in best_metric_value.keys():
+        print(f'Metirc {metric_name}: epoch {best_metric_epoch[metric_name]}, value: {best_metric_value[metric_name]}')
 
 
 def test():

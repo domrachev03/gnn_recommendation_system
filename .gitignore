@@ -560,3 +560,4 @@ cython_debug/
 #.idea/
 
 data/*
+**/*.pt

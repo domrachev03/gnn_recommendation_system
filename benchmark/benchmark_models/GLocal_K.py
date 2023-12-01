@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
+import argparse
 
 sys.path.append('benchmark')
 from metrics import get_metrics, get_metrics_names
@@ -193,7 +194,7 @@ def print_info(i: int, train_metrics: dict, test_metrics: dict, t, time_cumulati
 
 
 # Train & Val
-def train(data_path='/kaggle/input/u111111/', weights_output_dir='.', verbose=False):
+def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
     n_m, n_u, train_rating, train_mask, test_rating, test_mask = load_data_100k(path=data_path, delimiter='\t')
 
     # Common hyperparameter settings
@@ -252,10 +253,11 @@ def train(data_path='/kaggle/input/u111111/', weights_output_dir='.', verbose=Fa
         t = time() - tic
         time_cumulative += t
 
-        preds = preds.float().cpu().detach().numpy()
+        # Calculating global predictions
+        preds = np.clip(preds.float().cpu().detach().numpy(), 1, 5)
 
-        train_metrics = get_metrics(preds, test_rating, test_mask)
-        test_metrics = get_metrics(preds, train_rating, train_mask)
+        train_metrics = get_metrics(preds, train_rating, train_mask)
+        test_metrics = get_metrics(preds, test_rating, test_mask)
 
         # Early Stopping Criterion update
         if last_rmse - train_metrics['rmse'] < tol_p:
@@ -299,26 +301,26 @@ def train(data_path='/kaggle/input/u111111/', weights_output_dir='.', verbose=Fa
 
         loss = loss_fn(preds, reg, mask, x)
         loss.backward()
+        optimizer.step()
 
         glocal_k.eval()
         t = time() - tic
         time_cumulative += t
 
-        preds = preds.float().cpu().detach().numpy()
+        preds = np.clip(preds.float().cpu().detach().numpy(), 1, 5)
 
-        train_metrics = get_metrics(preds, test_rating, test_mask)
-        test_metrics = get_metrics(preds, train_rating, train_mask)
+        train_metrics = get_metrics(preds, train_rating, train_mask)
+        test_metrics = get_metrics(preds, test_rating, test_mask)
 
         for metric_name, is_bigger_better in metrics_info:
             # Updates both maximum and minimum, based on metrics information
             if (is_bigger_better and test_metrics[metric_name] > best_metric_value[metric_name]) or \
                (not is_bigger_better and test_metrics[metric_name] < best_metric_value[metric_name]):
-                torch.save(glocal_k.state_dict, f"{weights_output_dir}/best_model_{metric_name}.pt")
+                torch.save(glocal_k, f"{weights_output_dir}/best_model_{metric_name}.pt")
                 best_metric_value[metric_name] = test_metrics[metric_name]
                 best_metric_epoch[metric_name] = i+1
 
         if last_rmse-train_metrics['rmse'] < tol_f:
-            print(counter)
             counter += 1
         else:
             counter = 0
@@ -338,9 +340,66 @@ def train(data_path='/kaggle/input/u111111/', weights_output_dir='.', verbose=Fa
         print(f'Metirc {metric_name}: epoch {best_metric_epoch[metric_name]}, value: {best_metric_value[metric_name]}')
 
 
-def test():
-    pass
+def evaluate(data_path='data/raw/ml-100k/', weights='models/glocal_k/best_model_rmse.pt', verbose=False):
+    n_m, n_u, train_rating, _, test_rating, test_mask = load_data_100k(path=data_path, delimiter='\t')
+
+    # Common hyperparameter settings
+    n_hid = 500         # Size of hidden layers
+    n_dim = 5           # Inner AE embedding size
+    n_layers = 2        # Number of hidden layers
+    gk_size = 3         # Width=height of kernel for convolution
+
+    # Hyperparameters to tune for specific case
+    lambda_2 = 20.      # L2 regularization
+    lambda_s = 0.006    # L1 regularization
+    dot_scale = 1       # Dot product weight for global kernel
+
+    # autoencoder_net = KernelNet(n_u, n_hid, n_dim, n_layers, lambda_s, lambda_2).double().to(device)
+
+    # glocal_k = GLocal_K(
+    #     autoencoder_net, n_m, gk_size, dot_scale
+    # ).double().to(device)
+
+    glocal_k = torch.load(weights)
+
+    x = torch.Tensor(train_rating).double().to(device)
+
+    # Global finetuning
+    glocal_k.eval()
+
+    t_begin = time()    
+    x_local, _ = glocal_k.local_kernel_net(x)
+    preds, _ = glocal_k(x, x_local).float().cpu().detach().numpy()
+    dt = time() - t_begin
+
+    metrics = get_metrics(preds, test_rating, test_mask)
+
+    print('-' * 60)
+    print('INFERENCE')
+    print(f'Weights {weights.split(r"/")[-1]}')
+    for metric_name, metric_value in metrics.items():
+        print(f'    Metric {metric_name}: {metric_value}')
+    print('Evaluation time:', dt, 'seconds')
 
 
-if __name__ == '__main__':
-    train()
+if __name__ == '__main__':    
+    parser = argparse.ArgumentParser(
+        prog='GLocal_K benchmark network training',
+        description='''The script to run training or inference of the model. 
+
+        Note: both training and inference were validated on the MovieLense-100k dataset only.'''
+    )
+
+    parser.add_argument('-e', '--evaluate', action='store_true', help="Specify this argument to run the evaluation of the model")
+    parser.add_argument('-p', '--path', type=str, default='./', help='Path to the data')
+    parser.add_argument('-w', '--weights', type=str, help='Directory to load/save weights (depending on execution mode). Note: for training, the directory is expected, meanwhile for inference the specific file should be specified')
+    parser.add_argument('-v', '--verbose', action='store_true', help="Specify this argument for verbose output")
+
+    args = parser.parse_args()
+    if not args.evaluate:
+        path = args.path if args.path[-1] == '/' else args.path + '/'
+        train(data_path=path, weights_output_dir=args.weights, verbose=args.verbose)
+    else:
+        path = args.path if args.path[-1] == '/' else args.path + '/'
+        evaluate(data_path=path, weights=args.weights)
+# def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):

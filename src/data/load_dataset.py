@@ -24,6 +24,5 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--path', type=str, default='./', help='Output path for the data')
 
     args = parser.parse_args()
-    print(args.path, args.url)
 
     load_dataset(url=args.url, output_path=args.path)

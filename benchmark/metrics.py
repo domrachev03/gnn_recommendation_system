@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def dcg_k(score_label: np.array, k: int):
+def dcg_k(score_label, k):
     dcg, i = 0., 0
     for s in score_label:
         if i < k:
@@ -10,28 +10,27 @@ def dcg_k(score_label: np.array, k: int):
     return dcg
 
 
-def ndcg_k(preds: np.array, labels: np.array, k: int):
+def ndcg_k(preds, labels, k):
     score_label = np.stack([preds, labels], axis=1).tolist()
-
-    score_label_first = sorted(score_label, key=lambda d: d[0], reverse=True)
-    score_label_second = sorted(score_label, key=lambda d: d[1], reverse=True)
-
-    norm = dcg_k(score_label_first, k)
-    dcg = dcg_k(score_label_second, k)
-
+    score_label = sorted(score_label, key=lambda d: d[0], reverse=True)
+    score_label_ = sorted(score_label, key=lambda d: d[1], reverse=True)
+    norm, i = 0., 0
+    for s in score_label_:
+        if i < k:
+            norm += (2**s[1]-1) / np.log2(2+i)
+            i += 1
+    dcg = dcg_k(score_label, k)
     return dcg / norm
 
 
-def ndcg(preds: np.array, labels: np.array):
-    '''Discounted cumulative gain metric'''
-    preds = np.clip(preds, 1, 5)
+def ndcg(preds, labels):
     ndcg_sum, num = 0, 0
     preds, labels = preds.T, labels.T
-    n_users = preds.shape[0]
+    n_users = labels.shape[0]
 
     for i in range(n_users):
         preds_i = preds[i][np.where(labels[i])]
-        labels_i = preds[i][np.where(labels[i])]
+        labels_i = labels[i][np.where(labels[i])]
 
         if labels_i.shape[0] < 2:
             continue
@@ -87,7 +86,7 @@ def get_metrics_names():
     return (('rmse', False), ('mae', False), ('ndcg', True))
 
 
-def get_metrics(preds: np.ndarray, labels: np.ndarray, mask: np.ndarray | None = None, metrics_to_exclude):
+def get_metrics(preds: np.ndarray, labels: np.ndarray, mask: np.ndarray | None = None):
     '''Combine data from all metrics in the dictionary
 
     Parameters:

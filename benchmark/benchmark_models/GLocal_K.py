@@ -343,33 +343,32 @@ def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
 def evaluate(data_path='data/raw/ml-100k/', weights='models/glocal_k/best_model_rmse.pt', verbose=False):
     n_m, n_u, train_rating, _, test_rating, test_mask = load_data_100k(path=data_path, delimiter='\t')
 
-    # Common hyperparameter settings
-    n_hid = 500         # Size of hidden layers
-    n_dim = 5           # Inner AE embedding size
-    n_layers = 2        # Number of hidden layers
-    gk_size = 3         # Width=height of kernel for convolution
+    # # Common hyperparameter settings
+    # n_hid = 500         # Size of hidden layers
+    # n_dim = 5           # Inner AE embedding size
+    # n_layers = 2        # Number of hidden layers
+    # gk_size = 3         # Width=height of kernel for convolution
 
-    # Hyperparameters to tune for specific case
-    lambda_2 = 20.      # L2 regularization
-    lambda_s = 0.006    # L1 regularization
-    dot_scale = 1       # Dot product weight for global kernel
+    # # Hyperparameters to tune for specific case
+    # lambda_2 = 20.      # L2 regularization
+    # lambda_s = 0.006    # L1 regularization
+    # dot_scale = 1       # Dot product weight for global kernel
 
     # autoencoder_net = KernelNet(n_u, n_hid, n_dim, n_layers, lambda_s, lambda_2).double().to(device)
 
     # glocal_k = GLocal_K(
     #     autoencoder_net, n_m, gk_size, dot_scale
     # ).double().to(device)
-
-    glocal_k = torch.load(weights)
+    glocal_k = torch.load(weights, map_location=torch.device(device))
 
     x = torch.Tensor(train_rating).double().to(device)
 
     # Global finetuning
     glocal_k.eval()
 
-    t_begin = time()    
+    t_begin = time()
     x_local, _ = glocal_k.local_kernel_net(x)
-    preds, _ = glocal_k(x, x_local).float().cpu().detach().numpy()
+    preds = glocal_k(x, x_local)[0].float().cpu().detach().numpy()
     dt = time() - t_begin
 
     metrics = get_metrics(preds, test_rating, test_mask)

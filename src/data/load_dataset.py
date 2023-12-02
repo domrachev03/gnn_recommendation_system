@@ -19,8 +19,8 @@ def load_data_100k_np(path='./', delimiter='\t'):
     ''' Loading the dataset MovieLens into the predictor'''
 
     # Load raw data
-    train = np.loadtxt(path+'u1.base', skiprows=0, delimiter=delimiter).astype('int32')
-    test = np.loadtxt(path+'u1.test', skiprows=0, delimiter=delimiter).astype('int32')
+    train = np.loadtxt(path+'/u1.base', skiprows=0, delimiter=delimiter).astype('int32')
+    test = np.loadtxt(path+'/u1.test', skiprows=0, delimiter=delimiter).astype('int32')
     total = np.concatenate((train, test), axis=0)
 
     n_u = np.unique(total[:, 0]).size  # num of users

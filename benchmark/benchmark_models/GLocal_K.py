@@ -166,7 +166,7 @@ def print_info(i: int, train_metrics: dict, test_metrics: dict, t, time_cumulati
 
 
 # Train & Val
-def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
+def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=True):
     n_m, n_u, train_rating, train_mask, test_rating, test_mask = load_data_100k_np(path=data_path, delimiter='\t')
 
     # Common hyperparameter settings
@@ -241,11 +241,13 @@ def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
 
         # Trigerring Early Stopping
         if patience_p == counter:
-            print_info(i, train_metrics, test_metrics, t, time_cumulative)
+            if verbose:
+                print_info(i, train_metrics, test_metrics, t, time_cumulative)
             break
 
         if i % 50 == 0:
-            print_info(i, train_metrics, test_metrics, t, time_cumulative)
+            if verbose:
+                print_info(i, train_metrics, test_metrics, t, time_cumulative)
 
     # Predictions after pretraining from autoencoder
     train_rating_local = np.clip(preds, 1., 5.)
@@ -300,11 +302,13 @@ def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
 
         # Trigerring Early Stopping
         if patience_f == counter:
-            print_info(i, train_metrics, test_metrics, t, time_cumulative, is_pretraining=False)
+            if verbose:
+                print_info(i, train_metrics, test_metrics, t, time_cumulative, is_pretraining=False)
             break
 
         if i % 50 == 0:
-            print_info(i, train_metrics, test_metrics, t, time_cumulative, is_pretraining=False)
+            if verbose:
+                print_info(i, train_metrics, test_metrics, t, time_cumulative, is_pretraining=False)
 
     print('='*80)
     # Final result
@@ -312,7 +316,7 @@ def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
         print(f'Metirc {metric_name}: epoch {best_metric_epoch[metric_name]}, value: {best_metric_value[metric_name]}')
 
 
-def evaluate(data_path='data/raw/ml-100k/', weights='models/glocal_k/best_model_rmse.pt', verbose=False):
+def evaluate(data_path='data/raw/ml-100k/', weights='models/glocal_k/best_model_rmse.pt', verbose=True):
     n_m, n_u, train_rating, _, test_rating, test_mask = load_data_100k_np(path=data_path, delimiter='\t')
 
     glocal_k = torch.load(weights, map_location=torch.device(device))
@@ -329,11 +333,14 @@ def evaluate(data_path='data/raw/ml-100k/', weights='models/glocal_k/best_model_
 
     metrics = get_metrics(preds, test_rating, test_mask)
 
-    print('EVALUATION')
-    print(f'Weights {weights.split(r"/")[-1]}')
-    for metric_name, metric_value in metrics.items():
-        print(f'    Metric {metric_name}: {metric_value}')
-    print('Evaluation time:', dt, 'seconds')
+    if verbose:
+        print('EVALUATION')
+        print(f'Weights {weights.split(r"/")[-1]}')
+        for metric_name, metric_value in metrics.items():
+            print(f'    Metric {metric_name}: {metric_value}')
+        print('Evaluation time:', dt, 'seconds')
+
+    return metrics
 
 
 if __name__ == '__main__':

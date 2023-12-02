@@ -7,43 +7,13 @@ import sys
 import argparse
 
 sys.path.append('benchmark')
+sys.path.append('src/data')
+
 from metrics import get_metrics, get_metrics_names
+from load_dataset import load_data_100k_np
 
 torch.manual_seed(1284)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-
-def load_data_100k(path='./', delimiter='\t'):
-    ''' Loading the dataset MovieLens into the predictor'''
-
-    # Load raw data
-    train = np.loadtxt(path+'u1.base', skiprows=0, delimiter=delimiter).astype('int32')
-    test = np.loadtxt(path+'u1.test', skiprows=0, delimiter=delimiter).astype('int32')
-    total = np.concatenate((train, test), axis=0)
-
-    n_u = np.unique(total[:, 0]).size  # num of users
-    n_m = np.unique(total[:, 1]).size  # num of movies
-    n_train = train.shape[0]  # num of training ratings
-    n_test = test.shape[0]  # num of test ratings
-
-    # Rating matrix
-    train_rating = np.zeros((n_m, n_u), dtype='float32')
-    test_rating = np.zeros((n_m, n_u), dtype='float32')
-
-    for i in range(n_train):
-        #            item_id         usr_id          rating
-        train_rating[train[i, 1]-1, train[i, 0]-1] = train[i, 2]
-
-    for i in range(n_test):
-        #            item_id         usr_id          rating
-        test_rating[test[i, 1]-1, test[i, 0]-1] = test[i, 2]
-
-    # Masks, indicating non-zero entries
-    train_mask = np.greater(train_rating, 1e-12).astype('float32')
-    test_mask = np.greater(test_rating, 1e-12).astype('float32')
-
-    return n_m, n_u, train_rating, train_mask, test_rating, test_mask
-
 
 class KernelLayer(nn.Module):
     ''' Kernel layer of the model'''
@@ -156,7 +126,9 @@ class GLocal_K(nn.Module):
         conv2d = nn.LeakyReLU()(F.conv2d(input, W, stride=1, padding=1))
         return conv2d.squeeze(0).squeeze(0)
 
-    def forward(self, x, x_local):
+    def forward(self, x, x_local=None):
+        if x_local is None:
+            x_local, _ = self.local_kernel_net(x)
         # First, apply global kernel
         gk = self.global_kernel(x_local, self.gk_size, self.dot_scale)
         x = self.global_conv(x, gk)
@@ -195,7 +167,7 @@ def print_info(i: int, train_metrics: dict, test_metrics: dict, t, time_cumulati
 
 # Train & Val
 def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
-    n_m, n_u, train_rating, train_mask, test_rating, test_mask = load_data_100k(path=data_path, delimiter='\t')
+    n_m, n_u, train_rating, train_mask, test_rating, test_mask = load_data_100k_np(path=data_path, delimiter='\t')
 
     # Common hyperparameter settings
     n_hid = 500         # Size of hidden layers
@@ -341,24 +313,8 @@ def train(data_path='data/raw/ml-100k/', weights_output_dir='.', verbose=False):
 
 
 def evaluate(data_path='data/raw/ml-100k/', weights='models/glocal_k/best_model_rmse.pt', verbose=False):
-    n_m, n_u, train_rating, _, test_rating, test_mask = load_data_100k(path=data_path, delimiter='\t')
+    n_m, n_u, train_rating, _, test_rating, test_mask = load_data_100k_np(path=data_path, delimiter='\t')
 
-    # # Common hyperparameter settings
-    # n_hid = 500         # Size of hidden layers
-    # n_dim = 5           # Inner AE embedding size
-    # n_layers = 2        # Number of hidden layers
-    # gk_size = 3         # Width=height of kernel for convolution
-
-    # # Hyperparameters to tune for specific case
-    # lambda_2 = 20.      # L2 regularization
-    # lambda_s = 0.006    # L1 regularization
-    # dot_scale = 1       # Dot product weight for global kernel
-
-    # autoencoder_net = KernelNet(n_u, n_hid, n_dim, n_layers, lambda_s, lambda_2).double().to(device)
-
-    # glocal_k = GLocal_K(
-    #     autoencoder_net, n_m, gk_size, dot_scale
-    # ).double().to(device)
     glocal_k = torch.load(weights, map_location=torch.device(device))
 
     x = torch.Tensor(train_rating).double().to(device)
@@ -367,21 +323,20 @@ def evaluate(data_path='data/raw/ml-100k/', weights='models/glocal_k/best_model_
     glocal_k.eval()
 
     t_begin = time()
-    x_local, _ = glocal_k.local_kernel_net(x)
-    preds = glocal_k(x, x_local)[0].float().cpu().detach().numpy()
+
+    preds = glocal_k(x)[0].float().cpu().detach().numpy()
     dt = time() - t_begin
 
     metrics = get_metrics(preds, test_rating, test_mask)
 
-    print('-' * 60)
-    print('INFERENCE')
+    print('EVALUATION')
     print(f'Weights {weights.split(r"/")[-1]}')
     for metric_name, metric_value in metrics.items():
         print(f'    Metric {metric_name}: {metric_value}')
     print('Evaluation time:', dt, 'seconds')
 
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         prog='GLocal_K benchmark network training',
         description='''The script to run training or inference of the model. 

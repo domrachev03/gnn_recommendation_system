@@ -68,7 +68,21 @@ Disadvantages:
 * Unclear how to insert new users 
 
 ## Metrics
-During the trainig
+The training and evaluation process was based on three metrics:
+1. *Root Mean Square Error.* 
+    $$L = \sqrt{\frac{||M(X - \hat{X})||_2^2}{N}},$$
+where $X$ is complete adjacency matrix, $\hat{X}$ is predicted adjacency matrix, and:
+$$M_{i,j} = \begin{cases} 1\quad \text{ if } X_{i, j} \neq 0 \\ 0\quad \text{ otherwise}\end{cases},$$
+is true graph mask.
+2. *Mean Absolute Error*
+   $$L =  \frac{||M(X - \hat{X})||_1}{N}$$
+3. *Normalized discounted cumulative gain.*
+    $$L = \frac{NCG_N}{INCG_N},$$
+    where:
+    $$DCG_N = \sum_{i=1}^N \frac{2^{pred_i}-1}{\log_2(i+1)}$$
+    and
+    $$IDCG_N = \sum_{i=1}^k \frac{2^{ref_i}-1}{\log_2(i+1)}.$$
+Here, $pred_i$ is a predicted rating, $ref_i$ is a true rating. This is a canonical metric for the industry and competititons for recommendation system evaluation.
 
 ## Training Process
 The training was performed using early stopping method based on the Root MSE metric. 

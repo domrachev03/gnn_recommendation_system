@@ -58,7 +58,7 @@ The main dependencies are:
 
 For the convenience, all the dependencies are provided in the `requirements.txt` and `environment.yml`.
 
-## Utilization
+## Usage
 1. Loading the dataset
    Load the dataset
    ```bash

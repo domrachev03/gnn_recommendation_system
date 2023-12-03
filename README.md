@@ -3,7 +3,9 @@ First steps in recommendation systems area
 ![](reports/figures/inference.gif)
 
 ## Description
-This repository implemets the recomendation system based on the `MovieLens-100k` dataset. The repository contains the custom Graph Neural Networks trained on the dataset, benchmark model implementation, and simple inference script
+This repository implemets the recomendation system based on the `MovieLens-100k` dataset. The repository contains the custom Graph Neural Networks trained on the dataset, benchmark model implementation.
+
+Also, the inference for the recommendation is implemented. The user should enter his personal data, and then the model would generated the films he might like, based on the information from the dataset.
 
 > Note: the custom GNN is still under development, so currenly only the benchmark model is implemented. 
 
@@ -40,6 +42,8 @@ characteristics of each item. This results in quite decent performance (Fig. 4).
     </figure>
 </center>
 
+The weights could be found [here](https://drive.google.com/drive/folders/1_uMUOMg1IBYFQdbtek-CVcc1ge-6R0GA?usp=drive_link).
+
 ## Installation
 ```bash
 git push https://github.com/domrachev03/text_detoxification
@@ -55,7 +59,23 @@ The main dependencies are:
 For the convenience, all the dependencies are provided in the `requirements.txt` and `environment.yml`.
 
 ## Utilization
-
-
+1. Loading the dataset
+   Load the dataset
+   ```bash
+   python3 src/data/load_dataset.py -u https://files.grouplens.org/datasets/movielens/ml-100k.zip
+   ```
+2. `Glocal-k` 
+   Train:
+      ```bash
+      python3 benchmark/benchmark_models/GLocal_K.py -p data/raw/ml-100k -w models/glocal_k/
+      ```
+   Evaluation: 
+      ```bash
+      python3 benchmark/benchmark_models/GLocal_K.py -e -p data/raw/ml-100k -w models/glocal_k/best_model_mae.pt
+      ```
+3. Inference
+   ```bash
+   python3 src/inference.py -b --new     
+   ```
 ## Acknowledgement
 I would like to thanks the team of Practical Machine Learning and Deep Learning course for such a great opportunity to explore the world of Natural Language Processing. Special thanks to Vladimir Ivanov and Maxim Evgragov for tutorship and answering my (usually stupid) questions.
